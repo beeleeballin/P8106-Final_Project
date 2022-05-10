@@ -1,0 +1,293 @@
+---
+title: "Finals Code"
+author: "Brian Jo Hsuan Lee"
+date: '2022-05-10'
+output: pdf_document
+---
+
+Load packages
+```{r}
+library(tidyverse)
+library(caret)
+library(earth)
+```
+
+Clean data. Consolidate the historic team names into their corresponding current names; replace NA values in weather temperature, humidity and wind speed with each of their grand averages; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete betting line records; rid `schedule playoff` due to colinearity with the more informative `schedule week`; rid `spread_favored` and `weather details` as they are replaced by updated predictors; rid miscellaneous rows with empty values. DID NOT FILL MISSING DATA.
+
+```{r}
+data_eda = read_csv("spreadspoke_score.csv", 
+                    col_types = "iffffiiffddffiiic", 
+                    col_select = c("schedule_season":"weather_detail")) %>%
+  filter(
+    schedule_season %in% (1979:2021)
+  ) %>%
+  mutate(
+    schedule_season = droplevels(schedule_season),
+    stadium = droplevels(stadium),
+    dif = score_away - score_home, 
+    weather_detail = replace(weather_detail, is.na(weather_detail), "Dry"),
+    weather_detail = factor(weather_detail),
+    weather_temperature = replace(weather_temperature, is.na(weather_temperature), round(mean(weather_temperature, na.rm = T), digits = 3)),
+    weather_wind_mph = replace(weather_wind_mph, is.na(weather_wind_mph), round(mean(weather_wind_mph, na.rm = T), digits = 3)),
+    weather_humidity = replace(weather_humidity, is.na(weather_humidity),round(mean(weather_humidity, na.rm = T), digits = 3)),
+    schedule_week = fct_collapse(schedule_week, 
+                                 "SuperBowl" = c("Superbowl","SuperBowl"), 
+                                 "WildCard" = c("Wildcard","WildCard")),
+    schedule_week = fct_relevel(schedule_week, c(1:18, "WildCard", "Division", "Conference", "SuperBowl")),
+    team_home = fct_collapse(team_home, 
+                             "Tennessee Titans" = c("Tennessee Titans", "Tennessee Oilers", "Houston Oilers"), 
+                             "Washington Football Team" = c("Washington Football Team", "Washington Redskins"), 
+                             "Las Vegas Raiders" = c("Oakland Raiders", "Los Angeles Raiders", "Las Vegas Raiders"), 
+                             "Indianapolis Colts" = c("Baltimore Colts", "Indianapolis Colts"), 
+                             "Los Angeles Chargers" = c("Los Angeles Chargers", "San Diego Chargers"), 
+                             "Arizona Cardinals" = c("St. Louis Cardinals", "Phoenix Cardinals", "Arizona Cardinals"), 
+                             "Los Angeles Rams" = c("Los Angeles Rams", "St. Louis Rams"), 
+                             "New England Patriots" = c("New England Patriots", "Boston Patriots")),
+    team_away = fct_collapse(team_away, 
+                             "Tennessee Titans" = c("Tennessee Titans", "Tennessee Oilers", "Houston Oilers"), 
+                             "Washington Football Team" = c("Washington Football Team", "Washington Redskins"), 
+                             "Las Vegas Raiders" = c("Oakland Raiders", "Los Angeles Raiders", "Las Vegas Raiders"), 
+                             "Indianapolis Colts" = c("Baltimore Colts", "Indianapolis Colts"), 
+                             "Los Angeles Chargers" = c("Los Angeles Chargers", "San Diego Chargers"), 
+                             "Arizona Cardinals" = c("St. Louis Cardinals", "Phoenix Cardinals", "Arizona Cardinals"), 
+                             "Los Angeles Rams" = c("Los Angeles Rams", "St. Louis Rams"), 
+                             "New England Patriots" = c("New England Patriots", "Boston Patriots")),
+    team_away = fct_relevel(team_away, levels(team_home)),
+    team_favorite_id = recode_factor(team_favorite_id,
+                                     "MIA" = "Miami Dolphins",
+                                     "TEN" = "Tennessee Titans",
+                                     "LAC" = "Los Angeles Chargers",
+                                     "GB" = "Green Bay Packers",
+                                     "ATL" = "Atlanta Falcons",
+                                     "BUF" = "Buffalo Bills",
+                                     "DET" = "Detroit Lions",
+                                     "PIT" = "Pittsburgh Steelers",
+                                     "SF" = "San Francisco 49ers",
+                                     "ARI" = "Arizona Cardinals",
+                                     "WAS" = "Washington Football Team",
+                                     "LAR" = "Los Angeles Rams",
+                                     "CLE" = "Cleveland Browns",
+                                     "DAL" = "Dallas Cowboys",
+                                     "DEN" = "Denver Broncos",
+                                     "MIN" = "Minnesota Vikings",
+                                     "NYJ" = "New York Jets",
+                                     "LVR" = "Las Vegas Raiders",
+                                     "PHI" = "Philadelphia Eagles",
+                                     "IND" = "Indianapolis Colts",
+                                     "NE" = "New England Patriots",
+                                     "KC" = "Kansas City Chiefs",
+                                     "NYG" = "New York Giants",
+                                     "CHI" = "Chicago Bears",
+                                     "NO"= "New Orleans Saints",
+                                     "CIN" = "Cincinnati Bengals",
+                                     "SEA" = "Seattle Seahawks",
+                                     "TB" = "Tampa Bay Buccaneers",
+                                     "JAX" = "Jacksonville Jaguars",
+                                     "CAR" = "Carolina Panthers",
+                                     "BAL" = "Baltimore Ravens",
+                                     "HOU" = "Houston Texans",
+                                     .default = "None"),
+    spread_home = ifelse(as.character(team_away) == as.character(team_favorite_id), abs(spread_favorite), spread_favorite),
+    dome = ifelse(((as.character(weather_detail) == "DOME") | (as.character(weather_detail) == "DOME (Open Roof)")), TRUE, FALSE),
+    fog = ifelse((as.character(weather_detail) == "Fog") | (as.character(weather_detail) == "Rain | Fog") | (as.character(weather_detail) == "Snow | Fog"), T, F),
+    rain = ifelse((as.character(weather_detail) == "Rain") | (as.character(weather_detail) == "Rain | Fog") | (as.character(weather_detail) == "Snow | Freezing Rain"), T, F),
+    snow = ifelse((as.character(weather_detail) == "Snow") | (as.character(weather_detail) == "Snow | Fog"), T, F),
+  ) %>% 
+  select(-score_home, -score_away, -team_favorite_id, -spread_favorite, -weather_detail) %>%
+  drop_na()
+
+data = 
+  data_eda %>% 
+  select(-schedule_season, -schedule_playoff)
+```
+
+I'm currently exploring ways to fill the missing temperature, wind, and humidity data more appropriately. Right now, we are filling the NA entries in each with each of their grand means, but perhaps we can treat these variables as MARs and use imputation methods to fill them. 
+
+Transform 
+Partition data into training and testing sets, and define the resampling method.
+
+```{r}
+set.seed(2022)
+
+# partition data into training and testing sets into randomized 4:1 splits
+train_index = createDataPartition(y = data$dif, p = 0.8, list = FALSE)
+
+train_data = data[train_index, ]
+test_data = data[-train_index, ]
+train_cont_data = 
+  train_data %>% 
+  select(dif, over_under_line, spread_home, weather_temperature, weather_wind_mph, weather_humidity)
+
+# save an expanded version of training data for exploratory data analysis
+train_data_eda = data_eda[train_index, ]
+
+# apply yeo-johnson transformation on all numerical predictors to improve predictions of parametric models
+# and create matrices of predictors 
+train_pred = model.matrix(dif ~ ., train_data)[ ,-1]
+pp = preProcess(train_pred, method = c("YeoJohnson", "zv"))
+train_pred_pp = predict(pp, train_pred)
+train_cont_pred = model.matrix(dif ~ ., train_cont_data)[ ,-1]
+test_pred = model.matrix(dif ~ ., test_data)[ ,-1]
+test_pred_pp = predict(pp, test_pred)
+
+# vectors of response
+train_resp = train_data$dif
+test_resp = test_data$dif
+
+# use 2 repeats of 5-Fold CV since our dataset is rather large for our computing machines to run the typical 
+# 5 repeat 10-Fold CV
+ctrl = trainControl(method = "repeatedcv", repeats = 2, number = 5)
+```
+
+This is our preferred model from the midterm project. We will compare our new models with this. 
+```{r}
+set.seed(2022)
+mars_fit = train(train_pred_pp, train_resp,
+                 method = "earth",
+                 tuneGrid = expand.grid(degree = 1:3, nprune = 2:20),
+                 trControl = ctrl)
+ggplot(mars_fit, highlight = TRUE)
+```
+
+Has somebody fitted a RF and a Gradiented Boosted model yet? What are their best tuned parameters? Please let Brian know. 
+```{r}
+rf_grid = expand.grid(mtry = c(0, 5, 10, 15),
+                       # mtry = 1:19, 
+                       splitrule = "variance",
+                       min.node.size = 1
+                       # min.node.size = 1:6
+)
+set.seed(2022)
+rf_fit = train(train_pred_pp, train_resp,
+                method = "ranger",
+                tuneGrid = rf.grid,
+                trControl = ctrl)
+
+ggplot(rf.fit, highlight = TRUE)
+
+gbm.grid <- expand.grid(n.trees = c(2000,3000,4000,5000),
+                        interaction.depth = 1:5,
+                        shrinkage = c(0.001,0.003,0.005),
+                        n.minobsinnode = c(1,10))
+set.seed(2022)
+gbm.fit <- train(train_pred_pp, train_resp,
+                 method = "gbm",
+                 tuneGrid = gbm.grid,
+                 trControl = ctrl,
+                 verbose = FALSE)
+
+ggplot(gbm.fit, highlight = TRUE)
+```
+
+The super learner is an ensemble method using a variety of models as its base models. I want to build one using RF and GBM, so will need the optimal tuning parameters. 
+```{r}
+library(h2o)
+h2o.init()
+```
+
+2 model ensemble
+```{r}
+# Data preparation
+train_h2o = as.h2o(train_data)
+test_h2o = as.h2o(test_data)
+y <- "dif"
+x <- setdiff(names(train_h2o), y)
+
+# Train & cross-validate a GBM:
+my_gbm <- h2o.gbm(x = x,
+                  y = y,
+                  training_frame = train_h2o,
+                  distribution = "gaussian",
+                  ntrees = 10,
+                  max_depth = 3,
+                  min_rows = 2,
+                  learn_rate = 0.2,
+                  nfolds = nfolds,
+                  keep_cross_validation_predictions = TRUE,
+                  seed = 1)
+
+# Train & cross-validate a RF:
+my_rf <- h2o.randomForest(x = x,
+                          y = y,
+                          training_frame = train_h2o,
+                          ntrees = 50,
+                          nfolds = nfolds,
+                          keep_cross_validation_predictions = TRUE,
+                          seed = 1)
+
+# Train a stacked ensemble using the GBM and RF above:
+ensemble <- h2o.stackedEnsemble(x = x,
+                                y = y,
+                                training_frame = train_h2o,
+                                base_models = list(my_gbm, my_rf))
+
+# Evaluate ensemble performance on test set
+perf <- h2o.performance(ensemble, newdata = test_h2o)
+ensemble_auc_test <- h2o.auc(perf)
+
+# Compare the ensemble to GBM and RF (baseline learners) performance on the test set
+perf_gbm_test <- h2o.performance(my_gbm, newdata = test_h2o)
+perf_rf_test <- h2o.performance(my_rf, newdata = test_h2o)
+baselearner_best_auc_test <- max(h2o.auc(perf_gbm_test), 
+                                 h2o.auc(perf_rf_test))
+
+print(sprintf("Best Base-learner Test AUC: %s", baselearner_best_auc_test))
+print(sprintf("Ensemble Test AUC: %s", ensemble_auc_test))
+
+# Dif prediction on test set
+pred <- h2o.predict(ensemble, newdata = test)
+```
+
+Grid of Models
+```{r}
+# GBM hyperparamters
+learn_rate_opt <- c(0.01, 0.03)
+max_depth_opt <- c(3, 4, 5, 6, 9)
+sample_rate_opt <- c(0.7, 0.8, 0.9, 1.0)
+col_sample_rate_opt <- c(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
+hyper_params <- list(learn_rate = learn_rate_opt,
+                     max_depth = max_depth_opt,
+                     sample_rate = sample_rate_opt,
+                     col_sample_rate = col_sample_rate_opt)
+
+search_criteria <- list(strategy = "RandomDiscrete",
+                        max_models = 3,
+                        seed = 1)
+
+gbm_grid <- h2o.grid(algorithm = "gbm",
+                     grid_id = "gbm_grid_binomial",
+                     x = x,
+                     y = y,
+                     training_frame = train,
+                     ntrees = 10,
+                     seed = 1,
+                     nfolds = nfolds,
+                     keep_cross_validation_predictions = TRUE,
+                     hyper_params = hyper_params,
+                     search_criteria = search_criteria)
+
+# Train a stacked ensemble using the GBM grid
+ensemble <- h2o.stackedEnsemble(x = x,
+                                y = y,
+                                training_frame = train,
+                                base_models = gbm_grid@model_ids)
+
+# Eval ensemble performance on a test set
+perf <- h2o.performance(ensemble, newdata = test)
+
+# Compare to base learner performance on the test set
+.getauc <- function(mm) h2o.auc(h2o.performance(h2o.getModel(mm), newdata = test))
+baselearner_aucs <- sapply(gbm_grid@model_ids, .getauc)
+baselearner_best_auc_test <- max(baselearner_aucs)
+ensemble_auc_test <- h2o.auc(perf)
+print(sprintf("Best Base-learner Test AUC:  %s", baselearner_best_auc_test))
+print(sprintf("Ensemble Test AUC:  %s", ensemble_auc_test))
+
+# Generate predictions on a test set (if neccessary)
+pred <- h2o.predict(ensemble, newdata = test)
+```
+
+```{r}
+h2o.shutdown()
+```
+
