@@ -1,6 +1,6 @@
 ---
 title: "Finals Code"
-author: "Brian Jo Hsuan Lee"
+author: "Brian Jo Hsuan Lee | Jagjit Singh | Tanvir Khan"
 date: '2022-05-10'
 output: pdf_document
 ---
@@ -10,6 +10,13 @@ Load packages
 library(tidyverse)
 library(caret)
 library(earth)
+library(rpart)
+library(rpart.plot)
+library(ranger)
+library(purrr)
+
+
+ctrl = trainControl(method = "cv")
 ```
 
 Clean data. Consolidate the historic team names into their corresponding current names; replace NA values in weather temperature, humidity and wind speed with each of their grand averages; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete betting line records; rid `schedule playoff` due to colinearity with the more informative `schedule week`; rid `spread_favored` and `weather details` as they are replaced by updated predictors; rid miscellaneous rows with empty values. DID NOT FILL MISSING DATA.
@@ -133,10 +140,6 @@ test_pred_pp = predict(pp, test_pred)
 # vectors of response
 train_resp = train_data$dif
 test_resp = test_data$dif
-
-# use 2 repeats of 5-Fold CV since our dataset is rather large for our computing machines to run the typical 
-# 5 repeat 10-Fold CV
-ctrl = trainControl(method = "repeatedcv", repeats = 2, number = 5)
 ```
 
 This is our preferred model from the midterm project. We will compare our new models with this. 
@@ -289,5 +292,58 @@ pred <- h2o.predict(ensemble, newdata = test)
 
 ```{r}
 h2o.shutdown()
+```
+
+
+**Decision Tree** - Using CARET
+```{r}
+set.seed(2022)
+rpart.fit <- train(dif ~ . ,
+                   data = train_data,
+                   method = "rpart",
+                   tuneGrid = data.frame(cp = exp(seq(-50,-1, length = 100))),
+                   trControl = ctrl)
+
+
+ggplot(rpart.fit, highlight = TRUE)
+```
+
+```{r}
+rpart.plot(rpart.fit$finalModel)
+```
+
+```{r}
+rpart.fit$bestTune
+```
+
+
+Test Error
+```{r}
+rf_prediction <- predict(rpart.fit, newdata = test_data)
+rmse_rf <- RMSE(rf_prediction, test_resp)
+rmse_rf
+```
+
+Train Error
+```{r}
+rf_prediction_train <- predict(rpart.fit, newdata = train_data)
+rmse_rf_train <- RMSE(rf_prediction_train, train_resp)
+rmse_rf_train
+```
+
+**Random Forest** - Using Caret
+```{r}
+rf.grid <- expand.grid(mtry = 1:10,
+                       splitrule = "variance",
+                       min.node.size = 1:6)
+
+set.seed(1)
+rf.fit <- train(dif ~ . ,
+                train_data,
+                method = "ranger",
+                tuneGrid = rf.grid,
+                trControl = ctrl)
+
+ggplot(rf.fit, highlight = TRUE)
 ```
 
