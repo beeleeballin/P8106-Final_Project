@@ -12,6 +12,7 @@ library(caret)
 library(earth)
 library(rpart)
 library(rpart.plot)
+library(party)
 library(ranger)
 library(purrr)
 library(visdat)
@@ -186,31 +187,22 @@ enet_fit = train(dif ~ .,
                                         lambda = exp(seq(1, -3, length = 100))),
                  trControl = ctrl)
 ggplot(enet_fit, highlight = TRUE)
+
+enet_fit$bestTune
 ```
-
-
-
-
-
-
-
-
-
 
 **DECISION TREE** - Using CARET
 ```{r}
 set.seed(2022)
-rpart.fit = train(dif ~ ., 
+rpart_fit = train(dif ~ ., 
                   data = train_data,
                   method = "rpart",
-                  tuneGrid = data.frame(cp = exp(seq(-50,-5, length = 25))),
+                  tuneGrid = data.frame(cp = exp(seq(-30,-3, length = 100))),
                   trControl = ctrl)
+ggplot(rpart_fit, highlight = TRUE)
 
-ggplot(rpart.fit, highlight = TRUE)
-
-rpart.plot(rpart.fit$finalModel)
-
-rpart.fit$bestTune
+rpart.plot(rpart_fit$finalModel)
+rpart_fit$bestTune
 ```
 
 Train Error
@@ -225,43 +217,19 @@ rf_prediction = predict(rpart.fit, newdata = test_data)
 rmse_rf <- RMSE(rf_prediction, test_resp); rmse_rf
 ```
 
-
-
-
-
-
-
-
-
-
 **CONDITIONAL INFERENCE TREE** - Using CARET
 ```{r}
 set.seed(2022)
-ctree.fit <- train(dif ~ . ,
-                   train_data,
-                   method = "ctree",
-                   tuneGrid = data.frame(mincriterion = 1-exp(seq(-50, -5, length = 25))),
-                   trControl = ctrl)
+ctree_fit = train(dif ~ . ,
+                  train_data,
+                  method = "ctree",
+                  tuneGrid = data.frame(mincriterion = 1-exp(seq(-20, -3, length = 50))),
+                  trControl = ctrl)
+ggplot(ctree_fit, highlight = TRUE)
 
-
-ggplot(ctree.fit, highlight = TRUE)
+plot(ctree_fit$finalModel)
+ctree_fit$best
 ```
-
-```{r}
-ctree.fit$best
-```
-
-```{r}
-plot(ctree.fit$finalModel)
-```
-
-
-
-
-
-
-
-
 
 **Random Forest** - Using Caret
 ```{r}
@@ -283,43 +251,23 @@ rf.fit$bestTune
 ```
 
 
-
-
-
-
-
-
 **GBM** - Using CARET 
 ```{r}
-gbm.grid <- expand.grid(n.trees = c(1,50),
-                        interaction.depth = 1:5,
-                        shrinkage = c(0.001,0.003,0.005),
-                        n.minobsinnode = 1)
+gbm.grid = expand.grid(n.trees = c(2000,3000, 4000, 5000),
+                       interaction.depth = 1:5,
+                       shrinkage = c(0.001,0.003,0.005),
+                       n.minobsinnode = 10)
 set.seed(2022)
-gbm.fit <- train(dif ~ . , 
-                 train_data,
-                 method = "gbm",
-                 tuneGrid = gbm.grid,
-                 trControl = ctrl,
-                 verbose = FALSE)
-
+gbm.fit = train(dif ~ . , 
+                sample_n(train_data, 100),
+                method = "gbm",
+                tuneGrid = gbm.grid,
+                trControl = ctrl,
+                verbose = FALSE)
 ggplot(gbm.fit, highlight = TRUE)
-```
 
-
-```{r}
-ggplot(gbm.fit, highlight = TRUE)
-```
-
-
-
-```{r}
 gbm.fit$bestTune
 ```
-
-
-
-
 
 
 
