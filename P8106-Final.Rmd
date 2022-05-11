@@ -15,15 +15,13 @@ library(rpart.plot)
 library(ranger)
 library(purrr)
 library(visdat)
-
-
-ctrl = trainControl(method = "cv")
+library(h2o)
 ```
 
-Clean data. Consolidate the historic team names into their corresponding current names; replace NA values in weather temperature, humidity and wind speed with each of their grand averages; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete betting line records; rid `schedule playoff` due to colinearity with the more informative `schedule week`; rid `spread_favored` and `weather details` as they are replaced by updated predictors; rid miscellaneous rows with empty values. DID NOT FILL MISSING DATA.
+Clean data. Consolidate the historic team names into their corresponding current names; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete betting line records; rid `schedule playoff` due to collinearity with the more informative `schedule week`; rid `spread_favored` and `weather details` as they are replaced by updated predictors; manually fill in the 2021 season SuperBowl final score as the dataset was created before said game.
 
 ```{r}
-data_eda = read_csv("spreadspoke_scores.csv", 
+data = read_csv("spreadspoke_scores.csv", 
                     col_types = "iffffiiffddffiiic", 
                     col_select = c("schedule_season":"weather_detail")) %>%
   filter(
@@ -31,14 +29,16 @@ data_eda = read_csv("spreadspoke_scores.csv",
   ) %>%
   mutate(
     schedule_season = droplevels(schedule_season),
-    stadium = droplevels(stadium),
-    dif = score_away - score_home, 
-    weather_detail = replace(weather_detail, is.na(weather_detail), "Dry"),
-    weather_detail = factor(weather_detail),
     schedule_week = fct_collapse(schedule_week, 
                                  "SuperBowl" = c("Superbowl","SuperBowl"), 
                                  "WildCard" = c("Wildcard","WildCard")),
     schedule_week = fct_relevel(schedule_week, c(1:18, "WildCard", "Division", "Conference", "SuperBowl")),
+    stadium = droplevels(stadium),
+    score_home = ifelse(schedule_season == "2021" & schedule_week == "SuperBowl", 23, score_home),
+    score_away = ifelse(schedule_season == "2021" & schedule_week == "SuperBowl", 20, score_away),
+    dif = score_away - score_home, 
+    weather_detail = replace(weather_detail, is.na(weather_detail), "Dry"),
+    weather_detail = factor(weather_detail),
     team_home = fct_collapse(team_home, 
                              "Tennessee Titans" = c("Tennessee Titans", "Tennessee Oilers", "Houston Oilers"), 
                              "Washington Football Team" = c("Washington Football Team", "Washington Redskins"), 
@@ -98,15 +98,8 @@ data_eda = read_csv("spreadspoke_scores.csv",
     rain = ifelse((as.character(weather_detail) == "Rain") | (as.character(weather_detail) == "Rain | Fog") | (as.character(weather_detail) == "Snow | Freezing Rain"), T, F),
     snow = ifelse((as.character(weather_detail) == "Snow") | (as.character(weather_detail) == "Snow | Fog"), T, F),
   ) %>% 
-  select(-score_home, -score_away, -team_favorite_id, -spread_favorite, -weather_detail) %>% 
-  drop_na(dif)
-
-data = 
-  data_eda %>% 
-  select(-schedule_season, -schedule_playoff)
+  select(-score_home, -score_away, -team_favorite_id, -spread_favorite, -weather_detail)
 ```
-
-I'm currently exploring ways to fill the missing temperature, wind, and humidity data more appropriately. Right now, we are filling the NA entries in each with each of their grand means, but perhaps we can treat these variables as MARs and use imputation methods to fill them. 
 
 ```{r}
 vis_miss(data)
@@ -121,14 +114,17 @@ set.seed(2022)
 # partition data into training and testing sets into randomized 4:1 splits
 train_index = createDataPartition(y = data$dif, p = 0.8, list = FALSE)
 train_pred = 
-  data_eda %>% 
+  data %>% 
   filter(row_number() %in% train_index) %>% 
   select(-dif)
 test_pred = 
-  data_eda %>% 
+  data %>% 
   filter(!row_number() %in% train_index) %>% 
   select(-dif)
+```
 
+In the midterm, we replaced the NA values in weather temperature, humidity and wind speed with each of their grand averages. However, missing data imputation could be improved. Transformation on continuous predictors would also help improve predictions by scaling and standardizing their weights on the response. Here, we use the Yeo-Johnson transformation for non-positive numeric predictors and bag imputation to fill in the missing weather data. 
+```{r}
 vis_miss(train_pred)
 trans_imp = preProcess(train_pred, method = c("YeoJohnson", "zv", "bagImpute"))
 ti_train_pred = predict(trans_imp, train_pred)
@@ -136,22 +132,36 @@ vis_miss(ti_train_pred)
 ti_test_pred = predict(trans_imp, test_pred)
 ```
 
+Re-generate our training and testing data for analysis. Reserve an unpartitioned dataset for exploratory analysis.
 ```{r}
+eda_data = 
+  bind_rows(
+    data %>%
+      filter(row_number() %in% train_index) %>% 
+      select(dif) %>%
+      bind_cols(., ti_train_pred),
+    data %>%
+      filter(!row_number() %in% train_index) %>% 
+      select(dif) %>%
+      bind_cols(., ti_test_pred))
 train_data = 
-  data_eda %>% 
+  data %>% 
   filter(row_number() %in% train_index) %>% 
   select(dif) %>% 
-  bind_cols(., ti_train_pred)
+  bind_cols(., ti_train_pred) %>% 
+  select(-schedule_season, -schedule_playoff)
 test_data = 
-  data_eda %>% 
+  data %>% 
   filter(!row_number() %in% train_index) %>% 
   select(dif) %>% 
-  bind_cols(., ti_test_pred)
+  bind_cols(., ti_test_pred) %>% 
+  select(-schedule_season, -schedule_playoff)
 train_cont_data = 
   train_data %>% 
   select(dif, over_under_line, spread_home, weather_temperature, weather_wind_mph, weather_humidity)
 ```
 
+Some model building methods may require matrices with indicator varibles for categorical predictors. 
 ```{r}
 # create matrices of predictors 
 train_pred = model.matrix(dif ~ ., train_data)[ ,-1]
@@ -161,16 +171,65 @@ test_pred = model.matrix(dif ~ ., test_data)[ ,-1]
 # vectors of response
 train_resp = train_data$dif
 test_resp = test_data$dif
+
+ctrl = trainControl(method = "cv")
 ```
 
-This is our preferred model from the midterm project. We will compare our new models with this. 
+Elastic Net is our preferred model from the midterm project. We will compare our new models with this. 
 ```{r}
 set.seed(2022)
-mars_fit = train(train_pred_pp, train_resp,
-                 method = "earth",
-                 tuneGrid = expand.grid(degree = 1:3, nprune = 2:20),
+# Fit an elastic net model (L1 & L2 regularization, alpha = [0,1])
+enet_fit = train(dif ~ .,
+                 data = train_data,
+                 method = "glmnet",
+                 tuneGrid = expand.grid(alpha = seq(0, 1, length = 5),
+                                        lambda = exp(seq(1, -3, length = 100))),
                  trControl = ctrl)
-ggplot(mars_fit, highlight = TRUE)
+ggplot(enet_fit, highlight = TRUE)
+```
+
+**Decision Tree** - Using CARET
+```{r}
+set.seed(2022)
+rpart.fit = train(dif ~ ., 
+                  data = train_data,
+                  method = "rpart",
+                  tuneGrid = data.frame(cp = exp(seq(-50,-5, length = 100))),
+                  trControl = ctrl)
+
+ggplot(rpart.fit, highlight = TRUE)
+
+rpart.plot(rpart.fit$finalModel)
+
+rpart.fit$bestTune
+```
+
+Train Error
+```{r}
+rf_prediction_train = predict(rpart.fit, newdata = train_data)
+rmse_rf_train = RMSE(rf_prediction_train, train_resp); rmse_rf_train
+```
+
+Test Error
+```{r}
+rf_prediction = predict(rpart.fit, newdata = test_data)
+rmse_rf <- RMSE(rf_prediction, test_resp); rmse_rf
+```
+
+**Random Forest** - Using Caret
+```{r}
+rf.grid <- expand.grid(mtry = 1:10,
+                       splitrule = "variance",
+                       min.node.size = 1:6)
+
+set.seed(1)
+rf.fit <- train(dif ~ . ,
+                train_data,
+                method = "ranger",
+                tuneGrid = rf.grid,
+                trControl = ctrl)
+
+ggplot(rf.fit, highlight = TRUE)
 ```
 
 Has somebody fitted a RF and a Gradiented Boosted model yet? What are their best tuned parameters? Please let Brian know. 
@@ -205,7 +264,6 @@ ggplot(gbm.fit, highlight = TRUE)
 
 The super learner is an ensemble method using a variety of models as its base models. I want to build one using RF and GBM, so will need the optimal tuning parameters. 
 ```{r}
-library(h2o)
 h2o.init()
 ```
 
@@ -315,56 +373,4 @@ pred <- h2o.predict(ensemble, newdata = test)
 h2o.shutdown()
 ```
 
-
-**Decision Tree** - Using CARET
-```{r}
-set.seed(2022)
-rpart.fit <- train(dif ~ . ,
-                   data = train_data,
-                   method = "rpart",
-                   tuneGrid = data.frame(cp = exp(seq(-50,-1, length = 100))),
-                   trControl = ctrl)
-
-
-ggplot(rpart.fit, highlight = TRUE)
-```
-
-```{r}
-rpart.plot(rpart.fit$finalModel)
-```
-
-```{r}
-rpart.fit$bestTune
-```
-
-
-Test Error
-```{r}
-rf_prediction <- predict(rpart.fit, newdata = test_data)
-rmse_rf <- RMSE(rf_prediction, test_resp)
-rmse_rf
-```
-
-Train Error
-```{r}
-rf_prediction_train <- predict(rpart.fit, newdata = train_data)
-rmse_rf_train <- RMSE(rf_prediction_train, train_resp)
-rmse_rf_train
-```
-
-**Random Forest** - Using Caret
-```{r}
-rf.grid <- expand.grid(mtry = 1:10,
-                       splitrule = "variance",
-                       min.node.size = 1:6)
-
-set.seed(1)
-rf.fit <- train(dif ~ . ,
-                train_data,
-                method = "ranger",
-                tuneGrid = rf.grid,
-                trControl = ctrl)
-
-ggplot(rf.fit, highlight = TRUE)
-```
 
