@@ -14,6 +14,7 @@ library(rpart)
 library(rpart.plot)
 library(ranger)
 library(purrr)
+library(visdat)
 
 
 ctrl = trainControl(method = "cv")
@@ -22,7 +23,7 @@ ctrl = trainControl(method = "cv")
 Clean data. Consolidate the historic team names into their corresponding current names; replace NA values in weather temperature, humidity and wind speed with each of their grand averages; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete betting line records; rid `schedule playoff` due to colinearity with the more informative `schedule week`; rid `spread_favored` and `weather details` as they are replaced by updated predictors; rid miscellaneous rows with empty values. DID NOT FILL MISSING DATA.
 
 ```{r}
-data_eda = read_csv("spreadspoke_score.csv", 
+data_eda = read_csv("spreadspoke_scores.csv", 
                     col_types = "iffffiiffddffiiic", 
                     col_select = c("schedule_season":"weather_detail")) %>%
   filter(
@@ -34,9 +35,6 @@ data_eda = read_csv("spreadspoke_score.csv",
     dif = score_away - score_home, 
     weather_detail = replace(weather_detail, is.na(weather_detail), "Dry"),
     weather_detail = factor(weather_detail),
-    weather_temperature = replace(weather_temperature, is.na(weather_temperature), round(mean(weather_temperature, na.rm = T), digits = 3)),
-    weather_wind_mph = replace(weather_wind_mph, is.na(weather_wind_mph), round(mean(weather_wind_mph, na.rm = T), digits = 3)),
-    weather_humidity = replace(weather_humidity, is.na(weather_humidity),round(mean(weather_humidity, na.rm = T), digits = 3)),
     schedule_week = fct_collapse(schedule_week, 
                                  "SuperBowl" = c("Superbowl","SuperBowl"), 
                                  "WildCard" = c("Wildcard","WildCard")),
@@ -100,8 +98,8 @@ data_eda = read_csv("spreadspoke_score.csv",
     rain = ifelse((as.character(weather_detail) == "Rain") | (as.character(weather_detail) == "Rain | Fog") | (as.character(weather_detail) == "Snow | Freezing Rain"), T, F),
     snow = ifelse((as.character(weather_detail) == "Snow") | (as.character(weather_detail) == "Snow | Fog"), T, F),
   ) %>% 
-  select(-score_home, -score_away, -team_favorite_id, -spread_favorite, -weather_detail) %>%
-  drop_na()
+  select(-score_home, -score_away, -team_favorite_id, -spread_favorite, -weather_detail) %>% 
+  drop_na(dif)
 
 data = 
   data_eda %>% 
@@ -109,6 +107,10 @@ data =
 ```
 
 I'm currently exploring ways to fill the missing temperature, wind, and humidity data more appropriately. Right now, we are filling the NA entries in each with each of their grand means, but perhaps we can treat these variables as MARs and use imputation methods to fill them. 
+
+```{r}
+vis_miss(data)
+```
 
 Transform 
 Partition data into training and testing sets, and define the resampling method.
@@ -118,24 +120,43 @@ set.seed(2022)
 
 # partition data into training and testing sets into randomized 4:1 splits
 train_index = createDataPartition(y = data$dif, p = 0.8, list = FALSE)
+train_pred = 
+  data_eda %>% 
+  filter(row_number() %in% train_index) %>% 
+  select(-dif)
+test_pred = 
+  data_eda %>% 
+  filter(!row_number() %in% train_index) %>% 
+  select(-dif)
 
-train_data = data[train_index, ]
-test_data = data[-train_index, ]
+vis_miss(train_pred)
+trans_imp = preProcess(train_pred, method = c("YeoJohnson", "zv", "bagImpute"))
+ti_train_pred = predict(trans_imp, train_pred)
+vis_miss(ti_train_pred)
+ti_test_pred = predict(trans_imp, test_pred)
+```
+
+```{r}
+train_data = 
+  data_eda %>% 
+  filter(row_number() %in% train_index) %>% 
+  select(dif) %>% 
+  bind_cols(., ti_train_pred)
+test_data = 
+  data_eda %>% 
+  filter(!row_number() %in% train_index) %>% 
+  select(dif) %>% 
+  bind_cols(., ti_test_pred)
 train_cont_data = 
   train_data %>% 
   select(dif, over_under_line, spread_home, weather_temperature, weather_wind_mph, weather_humidity)
+```
 
-# save an expanded version of training data for exploratory data analysis
-train_data_eda = data_eda[train_index, ]
-
-# apply yeo-johnson transformation on all numerical predictors to improve predictions of parametric models
-# and create matrices of predictors 
+```{r}
+# create matrices of predictors 
 train_pred = model.matrix(dif ~ ., train_data)[ ,-1]
-pp = preProcess(train_pred, method = c("YeoJohnson", "zv"))
-train_pred_pp = predict(pp, train_pred)
 train_cont_pred = model.matrix(dif ~ ., train_cont_data)[ ,-1]
 test_pred = model.matrix(dif ~ ., test_data)[ ,-1]
-test_pred_pp = predict(pp, test_pred)
 
 # vectors of response
 train_resp = train_data$dif
