@@ -6,22 +6,20 @@ output: pdf_document
 ---
 
 Load packages
-```{r}
+```{r, message=F}
 library(tidyverse)
 library(caret)
 library(earth)
 library(rpart)
 library(rpart.plot)
-library(party)
 library(ranger)
-library(purrr)
 library(visdat)
 library(h2o)
 ```
 
 Clean data. Consolidate the historic team names into their corresponding current names; expand the weather detail column into boolean `dome`, `rain`, `fog`, and `snow` columns; update the spread values to those for the home team; rid seasons before 1979 due to incomplete betting line records; rid `schedule playoff` due to collinearity with the more informative `schedule week`; rid `spread_favored` and `weather details` as they are replaced by updated predictors; manually fill in the 2021 season SuperBowl final score as the dataset was created before said game.
 
-```{r}
+```{r, message=F}
 data = read_csv("spreadspoke_scores.csv", 
                     col_types = "iffffiiffddffiiic", 
                     col_select = c("schedule_season":"weather_detail")) %>%
@@ -189,6 +187,14 @@ enet_fit = train(dif ~ .,
 ggplot(enet_fit, highlight = TRUE)
 
 enet_fit$bestTune
+
+# training RMSE
+enet_prediction_train = predict(enet_fit, newdata = train_data)
+rmse_enet_train = RMSE(enet_prediction_train, train_resp); rmse_enet_train
+
+# testing RMSE
+enet_prediction_test = predict(enet_fit, newdata = test_data)
+rmse_enet_test <- RMSE(enet_prediction_test, test_resp); rmse_enet_test
 ```
 
 **DECISION TREE** - Using CARET
@@ -203,18 +209,14 @@ ggplot(rpart_fit, highlight = TRUE)
 
 rpart.plot(rpart_fit$finalModel)
 rpart_fit$bestTune
-```
 
-Train Error
-```{r}
-rf_prediction_train = predict(rpart.fit, newdata = train_data)
-rmse_rf_train = RMSE(rf_prediction_train, train_resp); rmse_rf_train
-```
+# training RMSE
+dtree_prediction_train = predict(rpart_fit, newdata = train_data)
+rmse_dtree_train = RMSE(dtree_prediction_train, train_resp); rmse_dtree_train
 
-Test Error
-```{r}
-rf_prediction = predict(rpart.fit, newdata = test_data)
-rmse_rf <- RMSE(rf_prediction, test_resp); rmse_rf
+# testing RMSE
+dtree_prediction_test = predict(rpart_fit, newdata = test_data)
+rmse_dtree_test <- RMSE(dtree_prediction_test, test_resp); rmse_dtree_test
 ```
 
 **CONDITIONAL INFERENCE TREE** - Using CARET
@@ -228,156 +230,162 @@ ctree_fit = train(dif ~ . ,
 ggplot(ctree_fit, highlight = TRUE)
 
 plot(ctree_fit$finalModel)
-ctree_fit$best
+ctree_fit$bestTune
+
+# training RMSE
+ctree_prediction_train = predict(ctree_fit, newdata = train_data)
+rmse_ctree_train = RMSE(ctree_prediction_train, train_resp); rmse_ctree_train
+
+# testing RMSE
+ctree_prediction_test = predict(ctree_fit, newdata = test_data)
+rmse_ctree_test = RMSE(ctree_prediction_test, test_resp); rmse_ctree_test
 ```
 
 **Random Forest** - Using Caret
-```{r}
-rf.grid = expand.grid(mtry = c(1:5),
+```{r, eval=F}
+rf_grid = expand.grid(mtry = c(1:14),
                       splitrule = "variance",
                       min.node.size = 1:6)
-
 set.seed(2022)
-rf.fit <- train(dif ~ . ,
-                train_data,
-                method = "ranger",tuneGrid = rf.grid,
-                trControl = ctrl)
+rf_fit = train(dif ~ . ,
+               train_data,
+               method = "ranger",
+               tuneGrid = rf_grid,
+               trControl = ctrl)
+ggplot(rf_fit, highlight = TRUE)
 
-ggplot(rf.fit, highlight = TRUE)
+rf_fit$bestTune
+
+# training RMSE: 8.354
+rf_prediction_train = predict(rf_fit, newdata = train_data)
+rmse_rf_train = RMSE(rf_prediction_train, train_resp); rmse_rf_train
+
+# testing RMSE: 13.519
+rf_prediction_test = predict(rf_fit, newdata = test_data)
+rmse_rf_test = RMSE(rf_prediction_test, test_resp); rmse_rf_test
 ```
-
-```{r}
-rf.fit$bestTune
-```
-
 
 **GBM** - Using CARET 
-```{r}
-gbm.grid = expand.grid(n.trees = c(2000,3000, 4000, 5000),
+```{r, eval=F}
+gbm_grid = expand.grid(n.trees = c(2000,3000, 4000, 5000),
                        interaction.depth = 1:5,
                        shrinkage = c(0.001,0.003,0.005),
                        n.minobsinnode = 10)
 set.seed(2022)
-gbm.fit = train(dif ~ . , 
-                sample_n(train_data, 100),
+gbm_fit = train(dif ~ . , 
+                train_data,
                 method = "gbm",
                 tuneGrid = gbm.grid,
                 trControl = ctrl,
                 verbose = FALSE)
-ggplot(gbm.fit, highlight = TRUE)
+ggplot(gbm_fit, highlight = TRUE)
 
-gbm.fit$bestTune
+gbm_fit$bestTune
+
+# training RMSE: 13.101
+gbm_prediction_train = predict(gbm_fit, newdata = train_data)
+rmse_gbm_train = RMSE(gbm_prediction_train, train_resp); rmse_gbm_train
+
+# testing RMSE: 13.735
+gbm_prediction_test = predict(gbm_fit, newdata = test_data)
+rmse_gbm_test = RMSE(gbm_prediction_test, test_resp); rmse_gbm_test
+```
+
+GBM tree variable importance
+```{r, eval=F}
+summary(gbm_fit$finalModel, las = 2, cBars = 19, cex.names = 0.6)
 ```
 
 
+Elastic Net, Decision tree, Conditional Inference Tree validated RMSE comparison
+```{r}
+resamp = resamples(list("ELASTIC_NET" = enet_fit,
+                        "DECISION_TREE" = rpart_fit,
+                        "CIT" = ctree_fit))
+summary(resamp)
+bwplot(resamp, metric = "RMSE")
+```
+
+
+Elastic Net, Decision tree, Conditional Inference tree, Random Forest, Gradient Boosted Model validated RMSE comparison
+```{r, eval=F}
+resamp = resamples(list("ELASTIC_NET" = enet_fit,
+                        "DECISION_TREE" = rpart_fit,
+                        "CIT" = ctree_fit,
+                        "RF" = rf_fit,
+                        "GBM" = gbm_fit))
+summary(resamp)
+bwplot(resamp, metric = "RMSE")
+```
 
 The super learner is an ensemble method using a variety of models as its base models. I want to build one using RF and GBM, so will need the optimal tuning parameters. 
-```{r}
+```{r, eval=F}
 h2o.init()
 ```
 
 2 model ensemble
-```{r}
+```{r, eval=F}
 # Data preparation
 train_h2o = as.h2o(train_data)
 test_h2o = as.h2o(test_data)
-y <- "dif"
-x <- setdiff(names(train_h2o), y)
+y = "dif"
+x = setdiff(names(train_h2o), y)
+nfolds = 10
 
 # Train & cross-validate a GBM:
-my_gbm <- h2o.gbm(x = x,
+h2o_gbm = h2o.gbm(x = x,
                   y = y,
                   training_frame = train_h2o,
                   distribution = "gaussian",
-                  ntrees = 10,
-                  max_depth = 3,
-                  min_rows = 2,
-                  learn_rate = 0.2,
+                  ntrees = 4000,
+                  max_depth = 5,
+                  min_rows = 10,
+                  learn_rate = 0.001,
                   nfolds = nfolds,
                   keep_cross_validation_predictions = TRUE,
-                  seed = 1)
+                  seed = 2022)
 
 # Train & cross-validate a RF:
-my_rf <- h2o.randomForest(x = x,
+h2o_rf = h2o.randomForest(x = x,
                           y = y,
                           training_frame = train_h2o,
-                          ntrees = 50,
+                          mtries = 14,
+                          min_rows = 5,
                           nfolds = nfolds,
                           keep_cross_validation_predictions = TRUE,
-                          seed = 1)
+                          seed = 2022)
 
 # Train a stacked ensemble using the GBM and RF above:
-ensemble <- h2o.stackedEnsemble(x = x,
-                                y = y,
-                                training_frame = train_h2o,
-                                base_models = list(my_gbm, my_rf))
+ensemble = h2o.stackedEnsemble(x = x,
+                               y = y,
+                               training_frame = train_h2o,
+                               keep_cross_validation_predictions = TRUE,
+                               base_models = list(h2o_gbm, h2o_rf))
+
+# Evaluate ensemble performance on training set
+train_perf = h2o.performance(ensemble, newdata = train_h2o)
+ensemble_train_rmse = h2o.rmse(train_perf); ensemble_train_rmse
 
 # Evaluate ensemble performance on test set
-perf <- h2o.performance(ensemble, newdata = test_h2o)
-ensemble_auc_test <- h2o.auc(perf)
+perf = h2o.performance(ensemble, newdata = test_h2o)
+ensemble_test_rmse = h2o.rmse(perf); ensemble_test_rmse
+
+# Compare the ensemble to GBM and RF (baseline learners) performance on the training set
+perf_gbm_train = h2o.performance(h2o_gbm, newdata = train_h2o)
+perf_rf_train = h2o.performance(h2o_rf, newdata = train_h2o)
+baselearner_best_train_rmse = min(h2o.rmse(perf_gbm_train), 
+                                 h2o.rmse(perf_rf_train)); baselearner_best_train_rmse
 
 # Compare the ensemble to GBM and RF (baseline learners) performance on the test set
-perf_gbm_test <- h2o.performance(my_gbm, newdata = test_h2o)
-perf_rf_test <- h2o.performance(my_rf, newdata = test_h2o)
-baselearner_best_auc_test <- max(h2o.auc(perf_gbm_test), 
-                                 h2o.auc(perf_rf_test))
+perf_gbm_test = h2o.performance(h2o_gbm, newdata = test_h2o)
+perf_rf_test = h2o.performance(h2o_rf, newdata = test_h2o)
+baselearner_best_test_rmse = min(h2o.rmse(perf_gbm_test), 
+                                 h2o.rmse(perf_rf_test)); baselearner_best_test_rmse
 
-print(sprintf("Best Base-learner Test AUC: %s", baselearner_best_auc_test))
-print(sprintf("Ensemble Test AUC: %s", ensemble_auc_test))
-
-# Dif prediction on test set
-pred <- h2o.predict(ensemble, newdata = test)
+print(sprintf("Best Base-learner Test RMSE: %s", baselearner_best_auc_test))
+print(sprintf("Ensemble Test RMSE: %s", ensemble_test_rmse))
 ```
 
-Grid of Models
-```{r}
-# GBM hyperparamters
-learn_rate_opt <- c(0.01, 0.03)
-max_depth_opt <- c(3, 4, 5, 6, 9)
-sample_rate_opt <- c(0.7, 0.8, 0.9, 1.0)
-col_sample_rate_opt <- c(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
-hyper_params <- list(learn_rate = learn_rate_opt,
-                     max_depth = max_depth_opt,
-                     sample_rate = sample_rate_opt,
-                     col_sample_rate = col_sample_rate_opt)
-
-search_criteria <- list(strategy = "RandomDiscrete",
-                        max_models = 3,
-                        seed = 1)
-
-gbm_grid <- h2o.grid(algorithm = "gbm",
-                     grid_id = "gbm_grid_binomial",
-                     x = x,
-                     y = y,
-                     training_frame = train,
-                     ntrees = 10,
-                     seed = 1,
-                     nfolds = nfolds,
-                     keep_cross_validation_predictions = TRUE,
-                     hyper_params = hyper_params,
-                     search_criteria = search_criteria)
-
-# Train a stacked ensemble using the GBM grid
-ensemble <- h2o.stackedEnsemble(x = x,
-                                y = y,
-                                training_frame = train,
-                                base_models = gbm_grid@model_ids)
-
-# Eval ensemble performance on a test set
-perf <- h2o.performance(ensemble, newdata = test)
-
-# Compare to base learner performance on the test set
-.getauc <- function(mm) h2o.auc(h2o.performance(h2o.getModel(mm), newdata = test))
-baselearner_aucs <- sapply(gbm_grid@model_ids, .getauc)
-baselearner_best_auc_test <- max(baselearner_aucs)
-ensemble_auc_test <- h2o.auc(perf)
-print(sprintf("Best Base-learner Test AUC:  %s", baselearner_best_auc_test))
-print(sprintf("Ensemble Test AUC:  %s", ensemble_auc_test))
-
-# Generate predictions on a test set (if neccessary)
-pred <- h2o.predict(ensemble, newdata = test)
-```
-
-```{r}
+```{r, eval=F}
 h2o.shutdown()
 ```
